@@ -74,9 +74,15 @@ def denoise_edm(
     sigma_max: float,
     autocast_dtype: torch.dtype | None = None,
     skip_type_scaling: bool = False,
+    cond: dict | None = None,
+    force_uncond: bool = False,
 ) -> dict[str, torch.Tensor]:
     """
     EDM preconditioning for all MP20 variables.
+
+    ``cond``/``force_uncond`` are forwarded to the model for property
+    conditioning (classifier-free guidance); both are no-ops for models without
+    a conditioner.
     """
     type_noisy = type_noisy.to(dtype=torch.float32)
     frac_noisy = frac_noisy.to(dtype=torch.float32)
@@ -120,6 +126,8 @@ def denoise_edm(
             pad_mask,
             t_sigma,
             lattice_bias_feats=lat_noisy,
+            cond=cond,
+            force_uncond=force_uncond,
         )
 
     type_raw = raw["type_logits"]

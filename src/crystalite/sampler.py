@@ -75,10 +75,51 @@ def edm_sampler(
     aa_rho_lattice: float = 0.0,
     aa_rho_types: float = 0.0,
     lattice_repr: str = "y1",
+    cond: dict | None = None,
+    guidance_scale: float = 1.0,
 ) -> dict[str, torch.Tensor]:
     device = pad_mask.device
     bsz, nmax = pad_mask.shape
     real_mask = ~pad_mask
+
+    def guided_denoise(
+        type_noisy: torch.Tensor,
+        frac_noisy: torch.Tensor,
+        lat_noisy: torch.Tensor,
+        sigma: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Single EDM denoise, optionally classifier-free guided.
+
+        With ``guidance_scale == 1`` (or no conditioning) this is one plain
+        conditional pass. Otherwise we run an unconditional and a conditional
+        pass and combine the predicted clean targets per field:
+            D = D_uncond + w * (D_cond - D_uncond)
+        """
+        kwargs = dict(
+            model=model,
+            type_noisy=type_noisy,
+            frac_noisy=frac_noisy,
+            lat_noisy=lat_noisy,
+            pad_mask=pad_mask,
+            sigma=sigma,
+            sigma_data_type=sigma_data_type,
+            sigma_data_coord=sigma_data_coord,
+            sigma_data_lat=sigma_data_lat,
+            sigma_min=sigma_min,
+            sigma_max=sigma_max,
+            autocast_dtype=autocast_dtype,
+            skip_type_scaling=skip_type_scaling,
+        )
+        if cond is None or abs(guidance_scale - 1.0) < 1e-12:
+            return denoise_edm(cond=cond, **kwargs)
+        d_uncond = denoise_edm(cond=cond, force_uncond=True, **kwargs)
+        if abs(guidance_scale) < 1e-12:
+            return d_uncond
+        d_cond = denoise_edm(cond=cond, force_uncond=False, **kwargs)
+        out = {}
+        for key in ("type", "frac", "lat"):
+            out[key] = d_uncond[key] + guidance_scale * (d_cond[key] - d_uncond[key])
+        return out
 
     type_x = torch.randn((bsz, nmax, type_dim), device=device, generator=generator)
     frac_x = torch.randn(
@@ -170,21 +211,7 @@ def edm_sampler(
             type_hat = fixed_atom_types.to(dtype=type_hat.dtype)
 
         sigma_hat = torch.full((bsz,), float(t_hat), device=device)
-        denoised = denoise_edm(
-            model=model,
-            type_noisy=type_hat,
-            frac_noisy=frac_hat,
-            lat_noisy=lat_hat,
-            pad_mask=pad_mask,
-            sigma=sigma_hat,
-            sigma_data_type=sigma_data_type,
-            sigma_data_coord=sigma_data_coord,
-            sigma_data_lat=sigma_data_lat,
-            sigma_min=sigma_min,
-            sigma_max=sigma_max,
-            autocast_dtype=autocast_dtype,
-            skip_type_scaling=skip_type_scaling,
-        )
+        denoised = guided_denoise(type_hat, frac_hat, lat_hat, sigma_hat)
 
         type_d = denoised["type"]
         frac_d = denoised["frac"]
@@ -219,21 +246,7 @@ def edm_sampler(
 
         if i < num_steps - 1:
             sigma_next = torch.full((bsz,), float(t_next_val), device=device)
-            denoised_next = denoise_edm(
-                model=model,
-                type_noisy=type_next,
-                frac_noisy=frac_next,
-                lat_noisy=lat_next,
-                pad_mask=pad_mask,
-                sigma=sigma_next,
-                sigma_data_type=sigma_data_type,
-                sigma_data_coord=sigma_data_coord,
-                sigma_data_lat=sigma_data_lat,
-                sigma_min=sigma_min,
-                sigma_max=sigma_max,
-                autocast_dtype=autocast_dtype,
-                skip_type_scaling=skip_type_scaling,
-            )
+            denoised_next = guided_denoise(type_next, frac_next, lat_next, sigma_next)
             type_d2 = denoised_next["type"]
             frac_d2 = denoised_next["frac"]
             lat_d2 = denoised_next["lat"]

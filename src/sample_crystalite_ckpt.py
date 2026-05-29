@@ -131,6 +131,8 @@ def _build_model_from_ckpt(
         dist_slope_init=float(model_args.get("dist_slope_init", -1.0)),
         use_noise_gate=bool(model_args.get("use_noise_gate", True)),
         gem_per_layer=bool(model_args.get("gem_per_layer", False)),
+        cond_properties=list(model_args.get("cond_properties", []) or []),
+        cond_p_uncond=float(model_args.get("cond_p_uncond", 0.1)),
     ).to(device)
 
     model_state = ckpt.get("model_state_dict", None)
@@ -324,7 +326,52 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Maximum number of CIFs to write. 0 means write all exported structures.",
     )
+    parser.add_argument(
+        "--target",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help=(
+            "Conditioning target, e.g. --target band_gap=2.0 --target space_group=225 "
+            "--target chemical_system=Li-O. Repeatable. Requires a conditional checkpoint."
+        ),
+    )
+    parser.add_argument(
+        "--guidance_scale",
+        type=float,
+        default=1.0,
+        help="Classifier-free guidance scale (1.0 = plain conditional, 0.0 = unconditional).",
+    )
     return parser.parse_args()
+
+
+def _parse_targets(raw: list[str]) -> dict[str, object]:
+    """Parse ``NAME=VALUE`` target strings; numeric where possible, else string."""
+    targets: dict[str, object] = {}
+    for entry in raw:
+        if "=" not in entry:
+            raise ValueError(f"Invalid --target '{entry}', expected NAME=VALUE.")
+        name, value = entry.split("=", 1)
+        try:
+            targets[name.strip()] = float(value)
+        except ValueError:
+            targets[name.strip()] = value.strip()
+    return targets
+
+
+def _broadcast_cond(
+    targets: dict[str, object], batch_size: int, device: torch.device
+) -> dict | None:
+    """Broadcast scalar targets to (B, 1) tensors and string targets to lists."""
+    if not targets:
+        return None
+    cond: dict = {}
+    for name, value in targets.items():
+        if isinstance(value, str):
+            cond[name] = [value] * batch_size
+        else:
+            cond[name] = torch.full((batch_size, 1), float(value), device=device)
+    return cond
 
 
 def main() -> None:
@@ -337,6 +384,16 @@ def main() -> None:
     )
     ckpt = _load_checkpoint(ckpt_path)
     model, model_args = _build_model_from_ckpt(ckpt=ckpt, device=torch.device("cpu"))
+
+    target_values = _parse_targets(args.target)
+    if target_values:
+        trained = set(model.cond_properties)
+        unknown = [k for k in target_values if k not in trained]
+        if unknown:
+            raise ValueError(
+                f"--target properties {unknown} were not trained into this checkpoint "
+                f"(trained: {sorted(trained)})."
+            )
 
     nmax = int(_cfg_value(args.nmax, model_args, "nmax", 20))
     dataset_name = str(_cfg_value(args.dataset_name, model_args, "dataset_name", "mp20"))
@@ -483,6 +540,8 @@ def main() -> None:
                 aa_rho_coords=aa_rho_coords,
                 aa_rho_lattice=aa_rho_lattice,
                 lattice_repr=lattice_repr,
+                cond=_broadcast_cond(target_values, pad_mask.shape[0], device),
+                guidance_scale=args.guidance_scale,
             )
 
             pad_mask_cpu = pad_mask.to("cpu")

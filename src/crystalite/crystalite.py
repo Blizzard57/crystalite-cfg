@@ -6,6 +6,7 @@ from torch import nn
 from src.models.embeddings import FourierCoordEmbedder, LatticeEmbedder, TimeEmbedder
 from src.models.transformer import TransformerTrunk
 from src.models.heads import CrystalHeads
+from src.models.property_conditioning import PropertyConditioner
 
 
 def mod1(x: torch.Tensor) -> torch.Tensor:
@@ -53,6 +54,8 @@ class CrystaliteModel(nn.Module):
         use_noise_gate: bool = True,
         gem_per_layer: bool = False,
         coord_head_mode: str = "direct",
+        cond_properties: list[str] | None = None,
+        cond_p_uncond: float = 0.1,
     ) -> None:
         super().__init__()
         self.type_dim = (vz + 1) if type_dim is None else int(type_dim)
@@ -101,6 +104,18 @@ class CrystaliteModel(nn.Module):
             type_out_dim=self.type_dim,
             coord_head_mode=coord_head_mode,
         )
+        # Optional property conditioning for classifier-free guidance.
+        self.cond_properties = list(cond_properties or [])
+        self.conditioner = (
+            PropertyConditioner(
+                properties=self.cond_properties,
+                d_model=d_model,
+                vz=vz,
+                p_uncond=cond_p_uncond,
+            )
+            if self.cond_properties
+            else None
+        )
 
     def forward(
         self,
@@ -110,6 +125,8 @@ class CrystaliteModel(nn.Module):
         pad_mask: torch.Tensor,
         t_sigma: torch.Tensor,
         lattice_bias_feats: torch.Tensor | None = None,
+        cond: dict | None = None,
+        force_uncond: bool = False,
     ) -> dict[str, torch.Tensor]:
         """
         Args:
@@ -120,6 +137,10 @@ class CrystaliteModel(nn.Module):
             t_sigma: (B,) scalar noise embedding; shared for t_g/t_a.
             lattice_bias_feats: optional (B, 6) lattice features used only for
                 geometry-aware attention bias. If None, lattice_feats is used.
+            cond: optional dict of conditioning property values keyed by canonical
+                property name. Ignored when no conditioner is configured.
+            force_uncond: if True, use the unconditional (null) embedding for all
+                properties; used for the unconditional pass of classifier-free guidance.
         """
         frac_mod = mod1(frac_coords)
         h_type = self.type_proj(type_feats) + self.coord_embed(frac_mod) + self.segment_embed.weight[0]
@@ -135,6 +156,14 @@ class CrystaliteModel(nn.Module):
             dim=1,
         )
         t_emb = self.time(t_sigma, t_sigma)
+        if self.conditioner is not None:
+            t_emb = t_emb + self.conditioner(
+                cond,
+                batch_size=t_emb.shape[0],
+                device=t_emb.device,
+                training=self.training,
+                force_uncond=force_uncond,
+            )
         # In the EDM codepath, t_sigma is the noise embedding c_noise = 0.25 * log(sigma).
         # GEM's noise gate expects sigma (positive, on the same scale as the Karras schedule),
         # so convert back here while keeping the time embedding on c_noise.

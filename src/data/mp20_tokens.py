@@ -11,6 +11,41 @@ from pymatgen.core.periodic_table import Element
 NMAX = 20  # default max atoms for MP20; override per dataset via MP20Tokens(nmax=...)
 VZ = 94  # elements are 1..94, 0 is NULL padding but there are not 94 elements in MP20!!!
 
+# Raw dataset CSV column -> canonical conditioning property name. Lets the model
+# see one consistent name (e.g. "space_group") regardless of which dataset (MP20
+# vs alex_mp20) it was trained on.
+PROPERTY_ALIASES = {
+    "e_above_hull": "energy_above_hull",
+    "spacegroup.number": "space_group",
+}
+
+# Standard (non-property) keys produced for every item; everything else in an
+# item dict is treated as a conditioning property by the collate function.
+_STANDARD_KEYS = {"mp_id", "A0", "F1", "Y1", "pad_mask", "num_atoms"}
+
+
+def canonical_property_name(column: str) -> str:
+    """Map a dataset CSV column name to its canonical conditioning name."""
+    return PROPERTY_ALIASES.get(column, column)
+
+
+def dataset_columns_for(properties: list[str]) -> list[str]:
+    """Candidate CSV columns to load for the requested canonical properties.
+
+    Includes the canonical name itself (matches alex_mp20 column names) plus any
+    aliased columns (e.g. MP20's ``e_above_hull`` for ``energy_above_hull``).
+    Preprocessing keeps only the columns actually present in the CSV.
+    """
+    canonical_to_columns: dict[str, list[str]] = {}
+    for col, canon in PROPERTY_ALIASES.items():
+        canonical_to_columns.setdefault(canon, []).append(col)
+    out: list[str] = []
+    for p in properties:
+        for c in [p, *canonical_to_columns.get(p, [])]:
+            if c not in out:
+                out.append(c)
+    return out
+
 
 def lattice_to_Y(lengths, angles_deg):
     """
@@ -144,6 +179,19 @@ def collate_mp20_tokens(batch):
         "pad_mask": torch.stack([b["pad_mask"] for b in batch], dim=0),  # (B,NMAX)
         "num_atoms": torch.tensor([b["num_atoms"] for b in batch], dtype=torch.long),
     }
+    # Pass through any conditioning properties present on the items. Numeric
+    # properties become (B, 1) float tensors with NaN where missing; string
+    # properties (e.g. chemical_system) are kept as a list of length B.
+    prop_keys = [k for k in batch[0].keys() if k not in _STANDARD_KEYS]
+    for k in prop_keys:
+        vals = [b.get(k, None) for b in batch]
+        if all(v is None or isinstance(v, str) for v in vals):
+            out[k] = vals
+        else:
+            out[k] = torch.tensor(
+                [float(v) if v is not None else float("nan") for v in vals],
+                dtype=torch.float32,
+            ).view(-1, 1)
     return out
 
 
@@ -280,7 +328,7 @@ class MP20Tokens(Dataset):
             if self.prop_list:
                 for k in self.prop_list:
                     if k in d:
-                        items[-1][k] = d[k]
+                        items[-1][canonical_property_name(k)] = d[k]
 
         torch.save(items, self.proc_pt)
         self.items = items

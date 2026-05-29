@@ -178,6 +178,8 @@ def _build_model_from_ckpt(
         dist_slope_init=float(model_args.get("dist_slope_init", -1.0)),
         use_noise_gate=bool(model_args.get("use_noise_gate", True)),
         gem_per_layer=bool(model_args.get("gem_per_layer", False)),
+        cond_properties=list(model_args.get("cond_properties", []) or []),
+        cond_p_uncond=float(model_args.get("cond_p_uncond", 0.1)),
     ).to(device)
 
     model_state = ckpt.get("model_state_dict", None)

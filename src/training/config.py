@@ -7,6 +7,7 @@ from src.utils.checkpoint import BEST_CKPT_SELECTOR_CHOICES
 from src.utils.constants import DATASET_NMAX_DEFAULTS
 from src.data.mp20_tokens import NMAX as DEFAULT_NMAX
 from src.crystalite.sampler import resolve_nonnegative_scalar, resolve_aa_rho_pair
+from src.models.property_conditioning import SUPPORTED_PROPERTIES
 
 
 def _normalize_topk_list(values: list[int]) -> list[int]:
@@ -463,6 +464,33 @@ def build_parser() -> argparse.ArgumentParser:
             "'frac_mse' is legacy wrapped fractional MSE; "
             "'cart_metric_vnorm_com' uses Cartesian metric error, removes COM drift, "
             "and normalizes by ((V/N)^(1/3))^2."
+        ),
+    )
+    # Property conditioning (classifier-free guidance)
+    parser.add_argument(
+        "--cond_properties",
+        type=str,
+        nargs="+",
+        default=[],
+        choices=sorted(SUPPORTED_PROPERTIES),
+        help=(
+            "Canonical property names to condition generation on (enables "
+            "classifier-free guidance). Empty means unconditional (default)."
+        ),
+    )
+    parser.add_argument(
+        "--cond_p_uncond",
+        type=float,
+        default=0.1,
+        help="Per-field probability of dropping conditioning during training (for CFG).",
+    )
+    parser.add_argument(
+        "--adapter_pretrained",
+        type=str,
+        default=None,
+        help=(
+            "Path to a base (unconditional) checkpoint to adapter-fine-tune from. "
+            "Loaded with strict=False; the zero-initialized conditioner is added on top."
         ),
     )
     # EDM specific

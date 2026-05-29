@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import sys
@@ -28,9 +29,11 @@ from src.utils.ema import EMA
 from src.data.mp20_tokens import (
     MP20Tokens,
     collate_mp20_tokens,
+    dataset_columns_for,
     NMAX as DEFAULT_NMAX,
     VZ,
 )
+from src.models.property_conditioning import scalar_property_names, SUPPORTED_PROPERTIES
 
 from src.eval.stability import _compute_thermo_metrics
 from src.eval.wasserstein import _compute_wasserstein_metrics
@@ -98,6 +101,66 @@ def _build_count_distribution(dataset, nmax: int) -> torch.Tensor:
     probs = counts[1:] / counts[1:].sum()
     return probs
 
+
+def _compute_scalar_stats(dataset, columns: list[str], properties: list[str]) -> dict:
+    """Per-scalar-property (mean, std) over the dataset, ignoring missing values."""
+    scalar_props = set(scalar_property_names(properties))
+    from src.data.mp20_tokens import canonical_property_name
+
+    values: dict[str, list[float]] = {p: [] for p in scalar_props}
+    for i in range(len(dataset)):
+        item = dataset[i]
+        for col in columns:
+            name = canonical_property_name(col)
+            if name in values and name in item and item[name] is not None:
+                v = float(item[name])
+                if not math.isnan(v):
+                    spec = SUPPORTED_PROPERTIES[name]
+                    if spec.get("log10"):
+                        v = math.log10(max(v, 1e-8))
+                    values[name].append(v)
+    stats: dict[str, tuple[float, float]] = {}
+    for name, vals in values.items():
+        if vals:
+            arr = np.asarray(vals, dtype=np.float64)
+            std = float(arr.std())
+            stats[name] = (float(arr.mean()), std if std > 1e-8 else 1.0)
+    return stats
+
+
+def _setup_property_conditioning(model, args, dataset, columns, device) -> None:
+    """Fit/load scalar normalization stats and optionally load an adapter base."""
+    if model.conditioner is not None:
+        stats_path = Path(args.output_dir) / "cond_stats.json"
+        if stats_path.exists():
+            stats = {k: tuple(v) for k, v in json.loads(stats_path.read_text()).items()}
+        else:
+            stats = _compute_scalar_stats(dataset, columns, args.cond_properties)
+            stats_path.parent.mkdir(parents=True, exist_ok=True)
+            stats_path.write_text(json.dumps(stats))
+        model.conditioner.fit_stats(stats)
+        print(f"[cond] scalar normalization stats: {stats}")
+
+    if args.adapter_pretrained:
+        base = torch.load(args.adapter_pretrained, map_location=device, weights_only=False)
+        base_state = base.get("model_state_dict", base)
+        missing, unexpected = model.load_state_dict(base_state, strict=False)
+        cond_missing = [k for k in missing if not k.startswith("conditioner.")]
+        if cond_missing or unexpected:
+            raise RuntimeError(
+                f"Adapter load mismatch beyond conditioner params. "
+                f"missing={cond_missing} unexpected={unexpected}"
+            )
+        print(f"[cond] adapter-loaded base from {args.adapter_pretrained}")
+
+
+def _cond_from_batch(batch: dict, properties: list[str]) -> dict | None:
+    """Collect configured conditioning values from a collated batch."""
+    if not properties:
+        return None
+    return {p: batch[p] for p in properties if p in batch}
+
+
 def main() -> None:
     from src.training.config import build_parser, validate_args
     parser = build_parser()
@@ -124,17 +187,21 @@ def main() -> None:
 
     has_split = ensure_dataset_splits(args.data_root, args.dataset_name)
 
+    cond_prop_columns = dataset_columns_for(args.cond_properties)
+
     ds = MP20Tokens(
         root=args.data_root,
         augment_translate=True,
         split="train" if has_split else "all",
         nmax=nmax,
+        prop_list=cond_prop_columns,
     )
     val_ds = MP20Tokens(
         root=args.data_root,
         augment_translate=False,
         split="val" if has_split else "all",
         nmax=nmax,
+        prop_list=cond_prop_columns,
     )
     ref_ds = MP20Tokens(
         root=args.data_root,
@@ -225,7 +292,12 @@ def main() -> None:
         dist_slope_init=args.dist_slope_init,
         use_noise_gate=args.use_noise_gate,
         gem_per_layer=args.gem_per_layer,
+        cond_properties=args.cond_properties,
+        cond_p_uncond=args.cond_p_uncond,
     ).to(device)
+
+    _setup_property_conditioning(model, args, ds, cond_prop_columns, device)
+
     num_params = sum(p.numel() for p in model.parameters())
     print(f"model parameters: {num_params}")
     optimizer = torch.optim.AdamW(
@@ -495,6 +567,7 @@ def main() -> None:
             sigma_max=args.sigma_max,
             autocast_dtype=bf16_dtype,
             skip_type_scaling=args.csp,
+            cond=_cond_from_batch(batch, args.cond_properties),
         )
 
         losses = compute_edm_loss(

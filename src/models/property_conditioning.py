@@ -168,7 +168,7 @@ class PropertyConditioner(nn.Module):
     def fit_stats(self, stats: dict[str, tuple[float, float]]) -> None:
         """Load precomputed (mean, std) for scalar properties into buffers."""
         for name, (mean, std) in stats.items():
-            emb = self.embedders.get(name)
+            emb = self.embedders[name] if name in self.embedders else None
             if isinstance(emb, _ScalarEmbedding):
                 emb.mean.fill_(float(mean))
                 emb.std.fill_(float(std))

@@ -545,7 +545,6 @@ def main() -> None:
         limit=len(sample_items),
         ref_structs=ref_structs or [],
         sample_seed=sample_seed,
-        include_diagnostics=True,
         include_wasserstein=bool(args.compute_wasserstein),
         wasserstein_max_samples=10000,
     )

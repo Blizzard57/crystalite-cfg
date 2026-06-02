@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import dataclasses
+import gzip
 import pickle
 from dataclasses import dataclass
 from functools import cached_property
@@ -32,7 +33,25 @@ if TYPE_CHECKING:
 
 
 def load_phase_diagram(ppd_path: Path | str):
-    with open(ppd_path, "rb") as f:
+    """Load a pickled (optionally gzipped) phase diagram.
+
+    The Materials Project phase diagram from matbench-discovery ships gzipped
+    (``2023-02-07-ppd-mp.pkl.gz``, https://figshare.com/files/48241624), so we
+    transparently handle both ``.pkl`` and ``.pkl.gz``.
+    """
+    path = Path(ppd_path)
+    if not path.exists() or path.stat().st_size == 0:
+        raise FileNotFoundError(
+            f"Phase diagram not found or empty at '{path}'. Download it with:\n"
+            "  curl -L -o /tmp/ppd.pkl.gz https://figshare.com/files/48241624\n"
+            f"  gunzip -c /tmp/ppd.pkl.gz > '{path}'\n"
+            "or run evaluation without thermo metrics (omit --thermo_count)."
+        )
+    # Detect gzip by magic bytes so a raw .pkl or a .pkl.gz both work.
+    with open(path, "rb") as f:
+        is_gzip = f.read(2) == b"\x1f\x8b"
+    opener = gzip.open if is_gzip else open
+    with opener(path, "rb") as f:
         return pickle.load(f)
 
 

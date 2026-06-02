@@ -645,6 +645,10 @@ def main() -> None:
             "fixed_num_atoms": args.fixed_num_atoms,
             "bf16": bool(args.bf16),
         },
+        "conditioning": {
+            "target": target_values,
+            "guidance_scale": float(args.guidance_scale),
+        },
         "outputs": {
             "save_pt": bool(args.save_pt),
             "save_extxyz": bool(args.save_extxyz),
